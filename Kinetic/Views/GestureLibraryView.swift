@@ -14,9 +14,13 @@ struct GestureLibraryView: View {
                     Text(gesture.name)
                         .font(.headline)
                     HStack {
-                        Text("\(gesture.sampleCount) samples")
-                        Text("·")
-                        Text(gesture.lastTrained, style: .relative)
+                        if gesture.sampleCount > 0 {
+                            Text("\(gesture.sampleCount) samples")
+                            Text("·")
+                            Text("Trained \(gesture.lastTrained, style: .relative) ago")
+                        } else {
+                            Text("Not trained")
+                        }
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)

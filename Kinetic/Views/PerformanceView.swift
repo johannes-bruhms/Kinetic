@@ -118,18 +118,20 @@ struct PerformanceView: View {
 
             oscSender.connect()
             sensorManager.startStreaming { sample in
-                oscSender.sendIMU(sample)
-                classifier.processSample(sample)
+                Task { @MainActor in
+                    oscSender.sendIMU(sample)
+                    classifier.processSample(sample)
 
-                // Check for gesture triggers
-                for (name, prob) in classifier.predictions where prob > 0.8 {
-                    oscSender.sendGestureEvent(name: name, probability: prob)
-                    if prob > 0.9 {
-                        oscSender.sendGestureTrigger(name: name)
-                        haptic.impactOccurred()
-                        recentGestures.append((name: name, time: .now))
-                        if recentGestures.count > 20 {
-                            recentGestures.removeFirst()
+                    // Check for gesture triggers
+                    for (name, prob) in classifier.predictions where prob > 0.8 {
+                        oscSender.sendGestureEvent(name: name, probability: prob)
+                        if prob > 0.9 {
+                            oscSender.sendGestureTrigger(name: name)
+                            haptic.impactOccurred()
+                            recentGestures.append((name: name, time: .now))
+                            if recentGestures.count > 20 {
+                                recentGestures.removeFirst()
+                            }
                         }
                     }
                 }

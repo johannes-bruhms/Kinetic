@@ -39,36 +39,46 @@ final class OSCSender: ObservableObject {
 
     func sendIMU(_ sample: MotionSample) {
         let prefix = configuration.prefix
-        sendOSCMessage(address: "\(prefix)imu/attitude/quat",
-                       values: [sample.attitude.x, sample.attitude.y, sample.attitude.z, sample.attitude.w])
-        sendOSCMessage(address: "\(prefix)imu/rotation/rate",
-                       values: [sample.rotationRate.x, sample.rotationRate.y, sample.rotationRate.z])
-        sendOSCMessage(address: "\(prefix)imu/accel/user",
-                       values: [sample.userAcceleration.x, sample.userAcceleration.y, sample.userAcceleration.z])
-        sendOSCMessage(address: "\(prefix)imu/gravity",
-                       values: [sample.gravity.x, sample.gravity.y, sample.gravity.z])
+        guard let connection = self.connection else { return }
+
+        sendQueue.async {
+            self.performSend(connection: connection, address: "\(prefix)imu/attitude/quat",
+                           values: [sample.attitude.x, sample.attitude.y, sample.attitude.z, sample.attitude.w])
+            self.performSend(connection: connection, address: "\(prefix)imu/rotation/rate",
+                           values: [sample.rotationRate.x, sample.rotationRate.y, sample.rotationRate.z])
+            self.performSend(connection: connection, address: "\(prefix)imu/accel/user",
+                           values: [sample.userAcceleration.x, sample.userAcceleration.y, sample.userAcceleration.z])
+            self.performSend(connection: connection, address: "\(prefix)imu/gravity",
+                           values: [sample.gravity.x, sample.gravity.y, sample.gravity.z])
+        }
     }
 
     func sendGestureEvent(name: String, probability: Float) {
         let prefix = configuration.prefix
-        sendOSCMessage(address: "\(prefix)gesture/\(name)", values: [Double(probability)])
+        guard let connection = self.connection else { return }
+
+        sendQueue.async {
+            self.performSend(connection: connection, address: "\(prefix)gesture/\(name)", values: [Double(probability)])
+        }
     }
 
     func sendGestureTrigger(name: String, velocity: Int = 127) {
         let prefix = configuration.prefix
-        sendOSCMessage(address: "\(prefix)gesture/\(name)/trigger", values: [Double(velocity)])
+        guard let connection = self.connection else { return }
+
+        sendQueue.async {
+            self.performSend(connection: connection, address: "\(prefix)gesture/\(name)/trigger", values: [Double(velocity)])
+        }
     }
 
     // MARK: - OSC Encoding
 
-    private func sendOSCMessage(address: String, values: [Double]) {
-        guard let connection else { return }
-
+    nonisolated private func performSend(connection: NWConnection, address: String, values: [Double]) {
         let data = encodeOSCMessage(address: address, floats: values.map { Float($0) })
         connection.send(content: data, completion: .contentProcessed { _ in })
     }
 
-    private func encodeOSCMessage(address: String, floats: [Float]) -> Data {
+    nonisolated private func encodeOSCMessage(address: String, floats: [Float]) -> Data {
         var data = Data()
 
         // Address pattern (null-terminated, padded to 4-byte boundary)
@@ -87,7 +97,7 @@ final class OSCSender: ObservableObject {
         return data
     }
 
-    private func oscString(_ string: String) -> Data {
+    nonisolated private func oscString(_ string: String) -> Data {
         var data = string.data(using: .utf8)!
         data.append(0) // null terminator
         while data.count % 4 != 0 {

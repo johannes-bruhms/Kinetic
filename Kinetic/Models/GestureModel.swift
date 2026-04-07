@@ -42,7 +42,7 @@ struct Vector3: Codable {
     let y: Double
     let z: Double
 
-    var magnitude: Double {
+    nonisolated var magnitude: Double {
         (x * x + y * y + z * z).squareRoot()
     }
 }

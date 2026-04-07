@@ -81,12 +81,14 @@ struct TestModeView: View {
             haptic.prepare()
 
             sensorManager.startStreaming { sample in
-                classifier.processSample(sample)
+                Task { @MainActor in
+                    classifier.processSample(sample)
 
-                for (name, prob) in classifier.predictions where prob > 0.9 {
-                    lastDetected = name
-                    if hapticEnabled {
-                        haptic.impactOccurred()
+                    for (name, prob) in classifier.predictions where prob > 0.9 {
+                        lastDetected = name
+                        if hapticEnabled {
+                            haptic.impactOccurred()
+                        }
                     }
                 }
             }
