@@ -26,9 +26,15 @@ cd ~/Kinetic
 
 Or transfer the folder from your PC via USB drive, AirDrop, or cloud storage.
 
-## Step 3: Create the Xcode Project
+## Step 3: Open the Project
 
-Since the `.xcodeproj` file can't be created on Windows, you'll create it once on Mac:
+The repo includes a `Kinetic.xcodeproj` file. Simply double-click it or:
+
+```bash
+open Kinetic.xcodeproj
+```
+
+If you need to recreate the Xcode project from scratch (e.g., after a fresh clone without the xcodeproj):
 
 1. Open Xcode → **File → New → Project**
 2. Choose **iOS → App** → Next
@@ -40,53 +46,21 @@ Since the `.xcodeproj` file can't be created on Windows, you'll create it once o
    - **Language:** Swift
    - Leave "Include Tests" checked
 4. Save it **inside the cloned repo folder** (e.g., `~/Kinetic`)
-5. Xcode creates a `Kinetic.xcodeproj` — this is your project file
+5. Delete the auto-generated `ContentView.swift` and `KineticApp.swift`
+6. Drag the `Kinetic/App/`, `Kinetic/Models/`, `Kinetic/Views/`, `Kinetic/Services/`, `Kinetic/Resources/` folders into the Xcode Project Navigator under the "Kinetic" group
+7. Drag `KineticTests/*.swift` into the "KineticTests" group
 
-## Step 4: Replace the Generated Files with Ours
-
-Xcode generates starter files that we need to replace with the ones in this repo:
-
-1. In Xcode's left sidebar (Project Navigator), **delete** the auto-generated files:
-   - `ContentView.swift`
-   - `KineticApp.swift` (the generated one)
-   - `Assets.xcassets` (the generated one)
-2. When Xcode asks, choose **"Move to Trash"**
-
-3. **Drag our source files into Xcode:**
-   - Select all files/folders inside `Kinetic/` from Finder:
-     - `App/`
-     - `Models/`
-     - `Views/`
-     - `Services/`
-     - `Resources/` (contains our Assets.xcassets)
-   - Drag them into the Xcode Project Navigator under the "Kinetic" group
-   - In the dialog that appears:
-     - Check **"Copy items if needed"** (only if files aren't already in the project folder)
-     - Check **"Create groups"**
-     - Make sure **"Kinetic"** target is checked
-     - Click **Finish**
-
-4. **Drag test files:**
-   - Drag everything in `KineticTests/` into the "KineticTests" group in Xcode
-   - Same dialog options as above, but target should be **"KineticTests"**
-
-## Step 5: Configure the Project
+## Step 4: Configure Signing
 
 1. Click the **Kinetic** project (blue icon) in the sidebar
-2. Under **General**:
-   - **Minimum Deployments:** iOS 17.0
-   - **Device Orientation:** Portrait (uncheck Landscape Left/Right for now)
-3. Under **Signing & Capabilities**:
+2. Under **Signing & Capabilities**:
    - Select your **Team** (your Apple ID)
    - Xcode will create a provisioning profile automatically
-4. Under **Info**:
-   - The `Info.plist` entries (motion usage, network usage) should be picked up automatically
-   - If not, add these keys manually:
-     - `NSMotionUsageDescription` → "Kinetic uses motion sensors to capture your gestures..."
-     - `NSLocalNetworkUsageDescription` → "Kinetic sends OSC messages over the local network..."
-     - `NSBonjourServices` → Array with `_osc._udp`
+3. Under **General**:
+   - **Minimum Deployments:** iOS 17.0
+   - **Device Orientation:** Portrait (uncheck Landscape Left/Right for now)
 
-## Step 6: Build and Run
+## Step 5: Build and Run
 
 1. **Connect your iPhone** via USB
 2. On your iPhone: **Settings → Privacy & Security → Developer Mode** → turn ON (restart required)
@@ -96,17 +70,27 @@ Xcode generates starter files that we need to replace with the ones in this repo
    - **Settings → General → VPN & Device Management** → tap your developer profile → **Trust**
 6. Run again — the app should launch on your phone
 
-## Step 7: Test the Companion Max Patch
+## Step 6: Test Gesture Recognition
 
-1. Open `Companion/KineticReceiver.maxpat` in Max (or Max for Live)
-2. Make sure your Mac and iPhone are on the **same WiFi network**
-3. Set the port in the Max patch to match the app's settings (default: 8000)
-4. In the Kinetic app, enter your Mac's IP address (find it in System Settings → WiFi → Details)
-5. Tap "Stream" — you should see the multisliders moving in Max
+1. In the app, go to **Library** → tap **+** → name a gesture (e.g., "Punch")
+2. Go to **Train** → select the gesture → tap **Start Recording**
+3. Perform the gesture 3-5 times with pauses between each
+4. Tap **Stop Recording** → review the detected segments → tap **Save Samples**
+5. Go back to **Performance** → tap **Stream** — the app will recognize the gesture
+
+## Step 7: Test OSC Output
+
+1. Make sure your Mac and iPhone are on the **same WiFi network**
+2. In the Kinetic app, go to **Settings** → enter your Mac's IP address
+   - Find your Mac's IP in System Settings → WiFi → Details
+   - Or enable Bonjour auto-discovery if your OSC host advertises `_osc._udp`
+3. Set the port to match your receiving software (default: 8000)
+4. Open your OSC receiver (Max/MSP, SuperCollider, Pure Data, etc.)
+5. Tap **Stream** in the app — you should see IMU data flowing
 
 ## Troubleshooting
 
-- **"Untrusted Developer"**: See Step 6.5 above
+- **"Untrusted Developer"**: See Step 5.5 above
 - **Build errors about missing files**: Make sure all `.swift` files are added to the Kinetic target (check the file inspector on the right sidebar — "Target Membership" should have Kinetic checked)
 - **No motion data in simulator**: The iOS Simulator has no IMU — you must use a real device
 - **OSC not arriving**: Check that both devices are on the same WiFi, and the IP/port match. Try disabling your Mac's firewall temporarily to test.
@@ -115,6 +99,6 @@ Xcode generates starter files that we need to replace with the ones in this repo
 ## Next Steps
 
 Once the basic app runs:
-- Train your first gesture and test it with the Max patch
-- Tweak the segmenter thresholds if auto-segmentation is too sensitive/insensitive
+- Train multiple gestures and test classification accuracy
+- Experiment with the DTW distance threshold by training more samples
 - Design your app icon (1024x1024 PNG) and drop it in `Resources/Assets.xcassets/AppIcon.appiconset/`

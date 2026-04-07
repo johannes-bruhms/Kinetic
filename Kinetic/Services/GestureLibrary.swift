@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 @MainActor
 final class GestureLibrary: ObservableObject {
@@ -66,6 +67,40 @@ final class GestureLibrary: ObservableObject {
             guard let data = try? Data(contentsOf: url) else { return nil }
             return try? JSONDecoder().decode(GestureRecording.self, from: data)
         }
+    }
+
+    /// Export all gesture data as a JSON archive to a temporary file, returns the URL.
+    func exportAllData() -> URL? {
+        struct ExportBundle: Encodable {
+            let exportDate: Date
+            let gestures: [TrainedGesture]
+            let recordings: [String: [GestureRecording]] // keyed by gesture name
+        }
+
+        var recordingsMap: [String: [GestureRecording]] = [:]
+        for gesture in gestures {
+            let recs = loadRecordings(for: gesture.id)
+            if !recs.isEmpty {
+                recordingsMap[gesture.name] = recs
+            }
+        }
+
+        let bundle = ExportBundle(
+            exportDate: .now,
+            gestures: gestures,
+            recordings: recordingsMap
+        )
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+
+        guard let data = try? encoder.encode(bundle) else { return nil }
+
+        let exportURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kinetic_export_\(Int(Date.now.timeIntervalSince1970)).json")
+        guard (try? data.write(to: exportURL)) != nil else { return nil }
+        return exportURL
     }
 
     // MARK: - Persistence

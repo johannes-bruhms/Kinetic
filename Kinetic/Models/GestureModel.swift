@@ -1,6 +1,6 @@
 import Foundation
 
-struct TrainedGesture: Identifiable, Codable {
+struct TrainedGesture: Identifiable, Codable, Hashable {
     let id: UUID
     var name: String
     var sampleCount: Int

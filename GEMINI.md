@@ -6,13 +6,13 @@ Kinetic is a professional, high-performance iOS application designed for contemp
 
 - **Core Purpose**: Real-time IMU data streaming and gesture classification for artistic performance.
 - **Main Technologies**:
-  - **Swift & SwiftUI**: Modern iOS development.
+  - **Swift & SwiftUI**: Modern iOS development with Swift 6 concurrency.
   - **CoreMotion**: High-frequency sensor data (100–200 Hz).
-  - **Core ML / Create ML**: Gesture classification and model inference.
+  - **DTW (Dynamic Time Warping)**: Primary gesture classification — works immediately after recording samples.
+  - **Core ML**: Optional upgrade path for neural network-based classification.
   - **NWConnection (Network Framework)**: Low-latency OSC over UDP (no external dependencies).
-  - **Swift 6 Concurrency**: Safe, off-main-thread processing for sensor data and networking.
-- **Architecture**: MVVM (transitioning from logic in views to dedicated ViewModels).
-- **Unique Features**: Energy-based auto-segmentation for gesture training, Bonjour auto-discovery for OSC hosts, and a "glove-friendly" dark-mode UI.
+- **Architecture**: MVVM with `@MainActor` default isolation.
+- **Unique Features**: Energy-based auto-segmentation for gesture training, Bonjour auto-discovery with endpoint resolution, haptic feedback on gesture triggers, and a "glove-friendly" dark-mode UI.
 
 ## Project Structure
 
@@ -20,15 +20,23 @@ Kinetic is a professional, high-performance iOS application designed for contemp
   - `App/`: Entry point (`KineticApp.swift`).
   - `Models/`: Data structures (`GestureModel.swift`, `OSCConfiguration.swift`).
   - `Services/`: Core logic providers.
-    - `SensorManager.swift`: Handles CoreMotion updates.
+    - `SensorManager.swift`: Handles CoreMotion updates at 100-200 Hz.
     - `OSCSender.swift`: Manual OSC encoding and UDP transmission.
-    - `GestureClassifier.swift`: Core ML integration for real-time inference.
-    - `GestureLibrary.swift`: Persistence and management of trained gestures.
-    - `GestureSegmenter.swift`: Energy-based motion segmentation.
-  - `Views/`: SwiftUI interface components (`PerformanceView.swift`, `TrainingView.swift`, etc.).
-  - `Resources/`: Assets and configuration.
-- `KineticTests/`: Unit tests for classifier, segmenter, and OSC encoding.
-- `Companion/`: (Planned) Laptop-side receiver patches (e.g., Max for Live).
+    - `GestureClassifier.swift`: Hybrid classifier — DTW primary, Core ML optional.
+    - `DTWClassifier.swift`: Template-based gesture matching via Dynamic Time Warping.
+    - `GestureSegmenter.swift`: Energy-based motion segmentation with hysteresis.
+    - `GestureLibrary.swift`: Persistence, recording management, and data export.
+    - `BonjourBrowser.swift`: Network service discovery with IP/port resolution.
+  - `Views/`: SwiftUI interface components.
+    - `PerformanceView.swift`: Main dashboard with stream toggle, waveform, gesture bars.
+    - `TrainingView.swift`: Gesture recording, auto-segmentation, segment review.
+    - `TestModeView.swift`: Full-screen rehearsal mode with haptic feedback.
+    - `GestureLibraryView.swift`: Gesture CRUD with rename (swipe-left) and delete (swipe-right).
+    - `SettingsView.swift`: OSC config, Bonjour discovery, sample rate, data export.
+    - `IMUWaveformView.swift`: Canvas-based real-time 3-axis waveform.
+    - `GestureProbabilityBarsView.swift`: Color-coded probability display.
+  - `Resources/`: Assets (AppIcon, AccentColor).
+- `KineticTests/`: Unit tests for DTW classifier, segmenter, and OSC encoding.
 
 ## Building and Running
 
@@ -38,26 +46,28 @@ Kinetic is a professional, high-performance iOS application designed for contemp
 
 ### Setup Instructions
 1. **Clone the Repo**: `git clone <repo-url>`
-2. **Create Xcode Project**: Since `.xcodeproj` is not tracked, create a new iOS App project named `Kinetic` in the root directory.
-3. **Add Files**:
-   - Drag the `Kinetic/` and `KineticTests/` folders into the Xcode project.
-   - Ensure "Copy items if needed" is NOT checked if files are already in the project directory.
-   - Verify "Kinetic" target membership for source files and "KineticTests" for tests.
-4. **Capabilities**:
-   - Add **Motion Usage** (`NSMotionUsageDescription`) to `Info.plist`.
-   - Add **Local Network** (`NSLocalNetworkUsageDescription`) and **Bonjour Services** (`_osc._udp`) to `Info.plist`.
-5. **Run**: Connect your iPhone, enable Developer Mode, and build/run (Cmd+R).
+2. **Open in Xcode**: Open `Kinetic.xcodeproj` directly.
+3. **Signing**: Select your team under Signing & Capabilities.
+4. **Run**: Connect your iPhone, enable Developer Mode, and build/run (Cmd+R).
+5. **Test**: Cmd+U to run unit tests (works in simulator).
 
 ## Development Conventions
 
-- **Performance First**: Sensor processing and OSC encoding must happen off the main thread.
-- **Native APIs**: Prefer native frameworks (CoreMotion, Network, Core ML) over external dependencies.
+- **Performance First**: Sensor processing and OSC encoding happen off the main thread.
+- **Native APIs**: Pure Apple frameworks — CoreMotion, Network, CoreML. No external dependencies.
+- **Swift 6 Concurrency**: Project uses `@MainActor` default isolation. Types used from background queues must be marked `nonisolated` (e.g., `DTWClassifier`, `GestureSegmenter`).
 - **UI/UX**: Dark mode only. Large, accessible controls for live performance contexts.
-- **Data Privacy**: No tracking or analytics. Motion data is ephemeral and only leaves the device via the user-configured OSC stream.
-- **Testing**: Ensure all OSC encoding and segmentation logic is verified in `KineticTests`.
+- **Data Privacy**: No tracking or analytics. Motion data never leaves the device except via user-configured OSC stream.
+- **Testing**: DTW, segmentation, and OSC encoding logic verified in `KineticTests`.
 
-## Key Commands (Mental Map)
+## How Gesture Recognition Works
+
+1. **Training**: User creates a gesture name, records motion samples, app auto-segments via energy thresholding.
+2. **Template Storage**: Segmented samples are saved as JSON recordings in the gesture library.
+3. **Classification**: During performance, the `GestureClassifier` loads saved recordings as DTW templates. A sliding window (50 samples, stride 10) is compared against all templates using Dynamic Time Warping distance.
+4. **Events**: When probability exceeds 0.8, an OSC gesture event fires. At 0.9+, a trigger event fires with haptic feedback.
+
+## Key Commands
 - **Run App**: `Cmd + R` (in Xcode)
 - **Run Tests**: `Cmd + U` (in Xcode)
 - **Clean Build**: `Cmd + Shift + K` (in Xcode)
-- **Swift Package Manager**: Used for future dependencies, managed via `Package.swift`.

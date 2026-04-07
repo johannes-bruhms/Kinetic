@@ -3,17 +3,19 @@ import Foundation
 /// Dynamic Time Warping gesture classifier — lightweight fallback that works
 /// without Core ML training. Compares incoming gesture windows against stored
 /// reference recordings using DTW distance.
-final class DTWClassifier {
-    struct Template {
+nonisolated final class DTWClassifier: @unchecked Sendable {
+    struct Template: Sendable {
         let gestureName: String
         let features: [[Double]] // [timeStep][feature]
     }
 
     private var templates: [Template] = []
-    private let distanceThreshold: Double
+    let threshold: Double
+
+    var hasTemplates: Bool { !templates.isEmpty }
 
     init(distanceThreshold: Double = 15.0) {
-        self.distanceThreshold = distanceThreshold
+        self.threshold = distanceThreshold
     }
 
     /// Register a recorded gesture segment as a reference template.
@@ -37,7 +39,7 @@ final class DTWClassifier {
         for template in templates {
             let dist = dtwDistance(query, template.features)
             let normalized = dist / Double(max(query.count, template.features.count))
-            if normalized < distanceThreshold {
+            if normalized < threshold {
                 results.append((name: template.gestureName, distance: normalized))
             }
         }

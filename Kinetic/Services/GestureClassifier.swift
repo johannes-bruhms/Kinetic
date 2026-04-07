@@ -1,12 +1,14 @@
 import Foundation
-import CoreML
+@preconcurrency import CoreML
+import Combine
 
 @MainActor
 final class GestureClassifier: ObservableObject {
     @Published var predictions: [String: Float] = [:]
     @Published var isModelLoaded = false
 
-    private var model: MLModel?
+    private var coreMLModel: MLModel?
+    private let dtwClassifier = DTWClassifier()
     private let inferenceQueue = DispatchQueue(label: "com.kinetic.inference", qos: .userInteractive)
 
     // Sliding window of recent samples for classification
@@ -16,11 +18,32 @@ final class GestureClassifier: ObservableObject {
 
     private var samplesSinceLastPrediction = 0
 
-    func loadModel(at url: URL) async throws {
+    /// Whether the classifier has any recognition capability (Core ML model or DTW templates).
+    var isReady: Bool {
+        coreMLModel != nil || dtwClassifier.hasTemplates
+    }
+
+    // MARK: - Model Loading
+
+    func loadCoreMLModel(at url: URL) async throws {
         let compiled = try await MLModel.compileModel(at: url)
-        model = try MLModel(contentsOf: compiled)
+        coreMLModel = try MLModel(contentsOf: compiled)
         isModelLoaded = true
     }
+
+    /// Load DTW templates from saved recordings in the gesture library.
+    func loadTemplates(from library: GestureLibrary) {
+        dtwClassifier.clearTemplates()
+        for gesture in library.gestures {
+            let recordings = library.loadRecordings(for: gesture.id)
+            for recording in recordings {
+                dtwClassifier.addTemplate(name: gesture.name, samples: recording.samples)
+            }
+        }
+        isModelLoaded = dtwClassifier.hasTemplates
+    }
+
+    // MARK: - Processing
 
     func processSample(_ sample: MotionSample) {
         sampleWindow.append(sample)
@@ -45,19 +68,23 @@ final class GestureClassifier: ObservableObject {
     // MARK: - Classification
 
     private func classify(window: [MotionSample]) {
-        guard let model else { return }
+        // Prefer Core ML if available, otherwise use DTW
+        if let model = coreMLModel {
+            classifyWithCoreML(model: model, window: window)
+        } else if dtwClassifier.hasTemplates {
+            classifyWithDTW(window: window)
+        }
+    }
+
+    private func classifyWithCoreML(model: MLModel, window: [MotionSample]) {
+        let ws = windowSize
+        guard let input = Self.buildInput(from: window, windowSize: ws) else { return }
 
         inferenceQueue.async { [weak self] in
-            guard let self else { return }
-
-            // Build MLMultiArray input from window
-            guard let input = self.buildInput(from: window) else { return }
-
             do {
                 let prediction = try model.prediction(from: input)
-                // Extract label and probabilities from prediction output
-                if let labelFeature = prediction.featureValue(for: "label"),
-                   let label = labelFeature.stringValue {
+                if let labelFeature = prediction.featureValue(for: "label") {
+                    let label = labelFeature.stringValue
 
                     var probs: [String: Float] = [:]
                     if let probsFeature = prediction.featureValue(for: "labelProbability"),
@@ -69,8 +96,9 @@ final class GestureClassifier: ObservableObject {
                         probs[label] = 1.0
                     }
 
+                    let result = probs
                     Task { @MainActor [weak self] in
-                        self?.predictions = probs
+                        self?.predictions = result
                     }
                 }
             } catch {
@@ -79,8 +107,32 @@ final class GestureClassifier: ObservableObject {
         }
     }
 
-    private func buildInput(from window: [MotionSample]) -> MLFeatureProvider? {
-        // 6 features: accel (x,y,z) + rotation rate (x,y,z)
+    private func classifyWithDTW(window: [MotionSample]) {
+        let classifier = dtwClassifier
+        let thresh = classifier.threshold
+        inferenceQueue.async { [weak self] in
+            let results = classifier.classify(window: window)
+
+            // Convert DTW distances to pseudo-probabilities
+            var probs: [String: Float] = [:]
+            for result in results {
+                let prob = Float(max(0, 1.0 - result.distance / thresh))
+                if let existing = probs[result.name] {
+                    probs[result.name] = max(existing, prob)
+                } else {
+                    probs[result.name] = prob
+                }
+            }
+
+            let result = probs
+            Task { @MainActor [weak self] in
+                self?.predictions = result
+            }
+        }
+    }
+
+    /// Build Core ML input array. Nonisolated so it can be called from background queues.
+    nonisolated private static func buildInput(from window: [MotionSample], windowSize: Int) -> MLFeatureProvider? {
         let featureCount = 6
         guard let array = try? MLMultiArray(shape: [NSNumber(value: windowSize), NSNumber(value: featureCount)], dataType: .float32) else {
             return nil

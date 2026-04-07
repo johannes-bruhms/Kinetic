@@ -2,7 +2,7 @@ import Foundation
 
 /// Auto-segments continuous motion recordings into individual gesture samples
 /// using energy-based thresholding with hysteresis.
-struct GestureSegmenter {
+nonisolated struct GestureSegmenter {
     var energyThresholdHigh: Double = 0.8
     var energyThresholdLow: Double = 0.3
     var minimumGestureDuration: TimeInterval = 0.15

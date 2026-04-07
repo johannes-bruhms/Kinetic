@@ -4,6 +4,8 @@ struct GestureLibraryView: View {
     @EnvironmentObject var gestureLibrary: GestureLibrary
     @State private var showingAddGesture = false
     @State private var newGestureName = ""
+    @State private var gestureToRename: TrainedGesture?
+    @State private var renameText = ""
 
     var body: some View {
         List {
@@ -25,6 +27,15 @@ struct GestureLibraryView: View {
                     } label: {
                         Label("Delete", systemImage: "trash")
                     }
+                }
+                .swipeActions(edge: .leading) {
+                    Button {
+                        renameText = gesture.name
+                        gestureToRename = gesture
+                    } label: {
+                        Label("Rename", systemImage: "pencil")
+                    }
+                    .tint(.blue)
                 }
             }
         }
@@ -48,9 +59,26 @@ struct GestureLibraryView: View {
                 newGestureName = ""
             }
         }
+        .alert("Rename Gesture", isPresented: Binding(
+            get: { gestureToRename != nil },
+            set: { if !$0 { gestureToRename = nil } }
+        )) {
+            TextField("New name", text: $renameText)
+            Button("Rename") {
+                if let gesture = gestureToRename, !renameText.isEmpty {
+                    gestureLibrary.renameGesture(gesture, to: renameText)
+                }
+                gestureToRename = nil
+                renameText = ""
+            }
+            Button("Cancel", role: .cancel) {
+                gestureToRename = nil
+                renameText = ""
+            }
+        }
         .overlay {
             if gestureLibrary.gestures.isEmpty {
-                ContentUnavailableView("No Gestures", systemImage: "hand.wave", description: Text("Tap + to train your first gesture"))
+                ContentUnavailableView("No Gestures", systemImage: "hand.wave", description: Text("Tap + to create your first gesture"))
             }
         }
     }

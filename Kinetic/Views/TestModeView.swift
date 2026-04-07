@@ -1,12 +1,16 @@
 import SwiftUI
+import UIKit
 
 struct TestModeView: View {
     @EnvironmentObject var sensorManager: SensorManager
     @EnvironmentObject var oscSender: OSCSender
+    @EnvironmentObject var gestureLibrary: GestureLibrary
     @StateObject private var classifier = GestureClassifier()
 
-    @State private var audioClickEnabled = false
+    @State private var hapticEnabled = true
     @State private var lastDetected: String?
+
+    private let haptic = UIImpactFeedbackGenerator(style: .heavy)
 
     var body: some View {
         VStack(spacing: 24) {
@@ -35,8 +39,10 @@ struct TestModeView: View {
                     }
                 }
                 .padding()
+            } else if !classifier.isReady {
+                ContentUnavailableView("No Gestures Trained", systemImage: "waveform.badge.exclamationmark", description: Text("Record gesture samples in the Training tab first"))
             } else {
-                ContentUnavailableView("No Model Loaded", systemImage: "waveform.badge.exclamationmark", description: Text("Train gestures first"))
+                ContentUnavailableView("Waiting for Motion", systemImage: "waveform", description: Text("Start the test and perform a gesture"))
             }
 
             if let detected = lastDetected {
@@ -48,7 +54,7 @@ struct TestModeView: View {
 
             Spacer()
 
-            Toggle("Audio Click on Detection", isOn: $audioClickEnabled)
+            Toggle("Haptic Feedback", isOn: $hapticEnabled)
                 .padding(.horizontal)
 
             Button(sensorManager.isStreaming ? "Stop" : "Start Test") {
@@ -61,6 +67,9 @@ struct TestModeView: View {
         }
         .navigationTitle("Test")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            classifier.loadTemplates(from: gestureLibrary)
+        }
     }
 
     private func toggleTest() {
@@ -68,14 +77,16 @@ struct TestModeView: View {
             sensorManager.stopStreaming()
             classifier.reset()
         } else {
+            classifier.loadTemplates(from: gestureLibrary)
+            haptic.prepare()
+
             sensorManager.startStreaming { sample in
                 classifier.processSample(sample)
 
                 for (name, prob) in classifier.predictions where prob > 0.9 {
                     lastDetected = name
-                    if audioClickEnabled {
-                        // System haptic as feedback
-                        // AudioServicesPlaySystemSound(1104)
+                    if hapticEnabled {
+                        haptic.impactOccurred()
                     }
                 }
             }

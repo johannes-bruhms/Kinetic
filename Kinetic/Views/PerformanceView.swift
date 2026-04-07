@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct PerformanceView: View {
     @EnvironmentObject var sensorManager: SensorManager
@@ -7,12 +8,23 @@ struct PerformanceView: View {
     @StateObject private var classifier = GestureClassifier()
 
     @State private var recentGestures: [(name: String, time: Date)] = []
+    private let haptic = UIImpactFeedbackGenerator(style: .heavy)
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 16) {
                 // Stream toggle
                 streamToggle
+
+                // Connection status
+                if sensorManager.isStreaming {
+                    HStack(spacing: 6) {
+                        Image(systemName: oscSender.isConnected ? "wifi" : "wifi.slash")
+                        Text(oscSender.isConnected ? "\(oscSender.configuration.host):\(oscSender.configuration.port)" : "Connecting...")
+                    }
+                    .font(.caption.monospaced())
+                    .foregroundStyle(oscSender.isConnected ? .green : .orange)
+                }
 
                 // Live IMU waveform
                 IMUWaveformView(sample: sensorManager.latestSample)
@@ -36,6 +48,9 @@ struct PerformanceView: View {
                 ToolbarItemGroup(placement: .bottomBar) {
                     bottomBar
                 }
+            }
+            .onAppear {
+                classifier.loadTemplates(from: gestureLibrary)
             }
         }
     }
@@ -97,6 +112,10 @@ struct PerformanceView: View {
             oscSender.disconnect()
             classifier.reset()
         } else {
+            // Reload templates in case user trained new gestures
+            classifier.loadTemplates(from: gestureLibrary)
+            haptic.prepare()
+
             oscSender.connect()
             sensorManager.startStreaming { sample in
                 oscSender.sendIMU(sample)
@@ -107,6 +126,7 @@ struct PerformanceView: View {
                     oscSender.sendGestureEvent(name: name, probability: prob)
                     if prob > 0.9 {
                         oscSender.sendGestureTrigger(name: name)
+                        haptic.impactOccurred()
                         recentGestures.append((name: name, time: .now))
                         if recentGestures.count > 20 {
                             recentGestures.removeFirst()

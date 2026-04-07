@@ -1,8 +1,13 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SettingsView: View {
     @EnvironmentObject var oscSender: OSCSender
+    @EnvironmentObject var gestureLibrary: GestureLibrary
     @StateObject private var bonjourBrowser = BonjourBrowser()
+
+    @State private var showingExportSheet = false
+    @State private var exportURL: URL?
 
     var body: some View {
         Form {
@@ -38,12 +43,25 @@ struct SettingsView: View {
                 if bonjourBrowser.isBrowsing {
                     ForEach(bonjourBrowser.discoveredHosts) { host in
                         Button {
-                            oscSender.configuration.host = host.host
+                            if !host.host.isEmpty {
+                                oscSender.configuration.host = host.host
+                            }
                             if host.port > 0 {
                                 oscSender.configuration.port = host.port
                             }
                         } label: {
-                            Label(host.name, systemImage: "network")
+                            HStack {
+                                Label(host.name, systemImage: "network")
+                                Spacer()
+                                if !host.host.isEmpty {
+                                    Text("\(host.host):\(host.port)")
+                                        .font(.caption.monospaced())
+                                        .foregroundStyle(.secondary)
+                                } else {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                }
+                            }
                         }
                     }
 
@@ -63,11 +81,49 @@ struct SettingsView: View {
             }
 
             Section("Data") {
-                Button("Export All Data") {
-                    // TODO: Share sheet with gesture data archive
+                Button("Export All Gesture Data") {
+                    exportGestureData()
+                }
+                .disabled(gestureLibrary.gestures.isEmpty)
+            }
+
+            Section("About") {
+                HStack {
+                    Text("Gestures")
+                    Spacer()
+                    Text("\(gestureLibrary.gestures.count)")
+                        .foregroundStyle(.secondary)
+                }
+                HStack {
+                    Text("Total Samples")
+                    Spacer()
+                    Text("\(gestureLibrary.gestures.reduce(0) { $0 + $1.sampleCount })")
+                        .foregroundStyle(.secondary)
                 }
             }
         }
         .navigationTitle("Settings")
+        .sheet(isPresented: $showingExportSheet) {
+            if let url = exportURL {
+                ShareSheet(items: [url])
+            }
+        }
     }
+
+    private func exportGestureData() {
+        guard let url = gestureLibrary.exportAllData() else { return }
+        exportURL = url
+        showingExportSheet = true
+    }
+}
+
+/// UIKit share sheet wrapper for SwiftUI.
+struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
