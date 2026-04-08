@@ -8,9 +8,20 @@ import Combine
 
 @MainActor
 final class GestureClassifier: ObservableObject {
+    // Discrete layer output
     @Published var predictions: [String: Float] = [:]
+    // Continuous layer output
+    @Published var continuousStates: [String: ContinuousGestureState] = [:]
+    // Posture layer output
+    @Published var postureStates: [String: Bool] = [:]
+
     @Published var isModelLoaded = false
     @Published var isTraining = false
+
+    // Latency measurement (ms)
+    @Published var discreteLatencyMs: Double = 0
+    @Published var continuousLatencyMs: Double = 0
+    @Published var postureLatencyMs: Double = 0
 
     /// On-device trained model (Random Forest from user's gesture recordings).
     private var onDeviceModel: MLModel?
@@ -18,21 +29,44 @@ final class GestureClassifier: ObservableObject {
     private var externalModel: MLModel?
     /// DTW fallback for when only one gesture class exists or model training fails.
     private let dtwClassifier = DTWClassifier()
+    /// Continuous gesture classifier (frequency-domain matching).
+    private let continuousClassifier = ContinuousClassifier()
+    /// Posture classifier (gravity vector matching).
+    private let postureClassifier = PostureClassifier()
 
     private let inferenceQueue = DispatchQueue(label: "com.kinetic.inference", qos: .userInteractive)
     #if !targetEnvironment(simulator)
     private let trainingQueue = DispatchQueue(label: "com.kinetic.training", qos: .userInitiated)
     #endif
 
-    // Sliding window for real-time classification
-    private var sampleWindow: [MotionSample] = []
-    private let windowSize = 50 // ~0.5s at 100Hz
-    private let strideSize = 10
-    private var samplesSinceLastPrediction = 0
+    // Three-layer sliding windows
+    private var discreteBuffer: [MotionSample] = []
+    private let discreteWindowSize = 50 // ~0.5s at 100Hz
+    private var continuousBuffer: [MotionSample] = []
+    private let continuousWindowSize = 150 // ~1.5s at 100Hz
+    private var postureBuffer: [MotionSample] = []
+    private let postureWindowSize = 50 // ~0.5s at 100Hz
+
+    // Classification cadence
+    private let discreteStride = 10
+    private let continuousStride = 25
+    private let postureStride = 50
+    private var samplesSinceDiscrete = 0
+    private var samplesSinceContinuous = 0
+    private var samplesSincePosture = 0
+
+    // Debounce: per-gesture cooldown for discrete triggers
+    private var lastTriggerTimes: [String: Date] = [:]
+    private var gestureCooldowns: [String: TimeInterval] = [:]
+
+    // Per-gesture sensitivity: trigger thresholds for discrete gestures
+    private var discreteTriggerThresholds: [String: Float] = [:]
+    private var dtwDistanceThresholds: [String: Double] = [:]
 
     /// Whether the classifier has any recognition capability.
     var isReady: Bool {
-        onDeviceModel != nil || externalModel != nil || dtwClassifier.hasTemplates
+        onDeviceModel != nil || externalModel != nil || dtwClassifier.hasTemplates ||
+        continuousClassifier.hasTemplates || postureClassifier.hasTemplates
     }
 
     // MARK: - Model Loading
@@ -44,19 +78,70 @@ final class GestureClassifier: ObservableObject {
         isModelLoaded = true
     }
 
-    /// Load DTW templates and train an on-device Core ML model from the
-    /// gesture library's saved recordings.
+    /// Load templates from the gesture library, routing by gesture type.
     func loadTemplates(from library: GestureLibrary) {
-        // Always load DTW templates as fallback
         dtwClassifier.clearTemplates()
+        continuousClassifier.clearTemplates()
+        postureClassifier.clearTemplates()
+        lastTriggerTimes.removeAll()
+        gestureCooldowns.removeAll()
+        discreteTriggerThresholds.removeAll()
+        dtwDistanceThresholds.removeAll()
+
         for gesture in library.gestures {
             let recordings = library.loadRecordings(for: gesture.id)
-            for recording in recordings {
-                dtwClassifier.addTemplate(name: gesture.name, samples: recording.samples)
+
+            switch gesture.gestureType {
+            case .discrete:
+                gestureCooldowns[gesture.name] = gesture.cooldownDuration
+                discreteTriggerThresholds[gesture.name] = gesture.discreteTriggerThreshold
+                dtwDistanceThresholds[gesture.name] = gesture.dtwDistanceThreshold
+                for recording in recordings {
+                    dtwClassifier.addTemplate(name: gesture.name, samples: recording.samples)
+                }
+
+            case .continuous:
+                // Extract profiles from recordings and average them
+                var profiles: [ContinuousGestureProfile] = []
+                for recording in recordings {
+                    if let profile = recording.extractedProfile {
+                        profiles.append(profile)
+                    } else if recording.samples.count >= 50 {
+                        profiles.append(FrequencyAnalyzer.extractProfile(from: recording.samples))
+                    }
+                }
+                if let avgProfile = FrequencyAnalyzer.averageProfiles(profiles) {
+                    continuousClassifier.addTemplate(
+                        name: gesture.name,
+                        profile: avgProfile,
+                        matchThreshold: gesture.continuousMatchThreshold
+                    )
+                }
+
+            case .posture:
+                for recording in recordings {
+                    if let postureVec = recording.postureVector {
+                        postureClassifier.addTemplate(
+                            name: gesture.name,
+                            gravityVector: postureVec,
+                            toleranceAngle: gesture.postureToleranceAngle
+                        )
+                        break // Only need one template per posture
+                    } else if !recording.samples.isEmpty {
+                        // Extract average gravity from samples
+                        let avgGravity = averageGravity(from: recording.samples)
+                        postureClassifier.addTemplate(
+                            name: gesture.name,
+                            gravityVector: avgGravity,
+                            toleranceAngle: gesture.postureToleranceAngle
+                        )
+                        break
+                    }
+                }
             }
         }
 
-        // Attempt on-device model training (needs ≥2 classes, device only)
+        // Attempt on-device model training for discrete gestures
         #if !targetEnvironment(simulator)
         trainOnDeviceModel(from: library)
         #endif
@@ -64,14 +149,16 @@ final class GestureClassifier: ObservableObject {
         isModelLoaded = isReady
     }
 
+    private func averageGravity(from samples: [MotionSample]) -> Vector3 {
+        Vector3.average(samples.map(\.gravity))
+    }
+
     // MARK: - On-Device Training
 
     #if !targetEnvironment(simulator)
-    /// Train an MLRandomForestClassifier on the user's recorded gesture data.
-    /// Runs on a background queue; DTW handles inference until the model is ready.
     private func trainOnDeviceModel(from library: GestureLibrary) {
-        let gesturesWithSamples = library.gestures.filter { $0.sampleCount > 0 }
-        guard gesturesWithSamples.count >= 2 else {
+        let discreteGestures = library.gestures.filter { $0.gestureType == .discrete && $0.sampleCount > 0 }
+        guard discreteGestures.count >= 2 else {
             onDeviceModel = nil
             return
         }
@@ -79,15 +166,13 @@ final class GestureClassifier: ObservableObject {
         var allFeatures: [[String: Double]] = []
         var allLabels: [String] = []
 
-        for gesture in gesturesWithSamples {
+        for gesture in discreteGestures {
             let recordings = library.loadRecordings(for: gesture.id)
             for recording in recordings {
-                // Original recording
                 let features = FeatureExtractor.extract(from: recording.samples)
                 allFeatures.append(features)
                 allLabels.append(gesture.name)
 
-                // Augmented variants (8 per recording) — jitter, scale, time-stretch
                 let augmented = FeatureExtractor.extractAugmented(from: recording.samples, count: 8)
                 for aug in augmented {
                     allFeatures.append(aug)
@@ -147,33 +232,80 @@ final class GestureClassifier: ObservableObject {
     // MARK: - Real-Time Processing
 
     func processSample(_ sample: MotionSample) {
-        sampleWindow.append(sample)
-        if sampleWindow.count > windowSize {
-            sampleWindow.removeFirst()
+        // Push to all three buffers
+        discreteBuffer.append(sample)
+        if discreteBuffer.count > discreteWindowSize {
+            discreteBuffer.removeFirst()
         }
 
-        samplesSinceLastPrediction += 1
+        continuousBuffer.append(sample)
+        if continuousBuffer.count > continuousWindowSize {
+            continuousBuffer.removeFirst()
+        }
 
-        if sampleWindow.count == windowSize && samplesSinceLastPrediction >= strideSize {
-            samplesSinceLastPrediction = 0
-            classify(window: sampleWindow)
+        postureBuffer.append(sample)
+        if postureBuffer.count > postureWindowSize {
+            postureBuffer.removeFirst()
+        }
+
+        // Discrete layer
+        samplesSinceDiscrete += 1
+        if discreteBuffer.count == discreteWindowSize && samplesSinceDiscrete >= discreteStride {
+            samplesSinceDiscrete = 0
+            classifyDiscrete(window: discreteBuffer)
+        }
+
+        // Continuous layer
+        samplesSinceContinuous += 1
+        if continuousBuffer.count >= 50 && samplesSinceContinuous >= continuousStride {
+            samplesSinceContinuous = 0
+            classifyContinuous(buffer: continuousBuffer)
+        }
+
+        // Posture layer
+        samplesSincePosture += 1
+        if postureBuffer.count == postureWindowSize && samplesSincePosture >= postureStride {
+            samplesSincePosture = 0
+            classifyPosture(buffer: postureBuffer)
         }
     }
 
     func reset() {
-        sampleWindow.removeAll()
+        discreteBuffer.removeAll()
+        continuousBuffer.removeAll()
+        postureBuffer.removeAll()
         predictions.removeAll()
-        samplesSinceLastPrediction = 0
+        continuousStates.removeAll()
+        postureStates.removeAll()
+        samplesSinceDiscrete = 0
+        samplesSinceContinuous = 0
+        samplesSincePosture = 0
     }
 
-    // MARK: - Classification
+    // MARK: - Debounce & Sensitivity
 
-    /// Minimum mean energy in a window to trigger classification.
-    /// Prevents the Random Forest from confidently classifying idle movement.
-    private let energyGateThreshold = 0.4
+    /// Check if a discrete gesture trigger should be suppressed by cooldown.
+    func shouldTrigger(gestureName: String) -> Bool {
+        let cooldown = gestureCooldowns[gestureName] ?? 0.5
+        if let lastTime = lastTriggerTimes[gestureName] {
+            if Date.now.timeIntervalSince(lastTime) < cooldown {
+                return false
+            }
+        }
+        lastTriggerTimes[gestureName] = .now
+        return true
+    }
 
-    private func classify(window: [MotionSample]) {
-        // Energy gate: reject windows with insufficient motion
+    /// Per-gesture trigger threshold (probability above which to fire).
+    func triggerThreshold(for gestureName: String) -> Float {
+        discreteTriggerThresholds[gestureName] ?? 0.85
+    }
+
+    // MARK: - Discrete Classification
+
+    private let energyGateThreshold = 0.2
+
+    private func classifyDiscrete(window: [MotionSample]) {
         let meanEnergy = window.reduce(0.0) { sum, s in
             sum + s.userAcceleration.magnitude + s.rotationRate.magnitude
         } / Double(window.count)
@@ -185,18 +317,29 @@ final class GestureClassifier: ObservableObject {
             return
         }
 
+        let startTime = CFAbsoluteTimeGetCurrent()
         if let model = onDeviceModel {
-            classifyWithOnDeviceModel(model: model, window: window)
+            classifyWithOnDeviceModel(model: model, window: window, startTime: startTime)
         } else if let model = externalModel {
-            classifyWithExternalModel(model: model, window: window)
+            classifyWithExternalModel(model: model, window: window, startTime: startTime)
         } else if dtwClassifier.hasTemplates {
-            classifyWithDTW(window: window)
+            classifyWithDTW(window: window, startTime: startTime)
         }
     }
 
-    /// Classify using the on-device trained Random Forest model.
-    private func classifyWithOnDeviceModel(model: MLModel, window: [MotionSample]) {
+    /// Convert DTW distance to probability using per-gesture distance threshold.
+    /// Returns a closure that can be called from the inference queue.
+    private func makeDtwProbabilityFn() -> @Sendable (String, Double) -> Float {
+        let thresholds = dtwDistanceThresholds
+        return { name, distance in
+            let thresh = thresholds[name] ?? 4.0
+            return Float(max(0, 1.0 - distance / thresh))
+        }
+    }
+
+    private func classifyWithOnDeviceModel(model: MLModel, window: [MotionSample], startTime: CFAbsoluteTime) {
         let windowCopy = window
+        let dtwProb = makeDtwProbabilityFn()
         inferenceQueue.async { [weak self] in
             let features = FeatureExtractor.extract(from: windowCopy)
             var mlFeatures: [String: MLFeatureValue] = [:]
@@ -219,18 +362,18 @@ final class GestureClassifier: ObservableObject {
                 }
 
                 let result = probs
+                let latency = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
                 Task { @MainActor [weak self] in
                     self?.predictions = result
+                    self?.discreteLatencyMs = latency
                 }
             } catch {
-                // On-device model failed — fall back to DTW inline
                 guard let self else { return }
                 let classifier = self.dtwClassifier
-                let thresh = classifier.threshold
                 let results = classifier.classify(window: windowCopy)
                 var probs: [String: Float] = [:]
                 for result in results {
-                    let prob = Float(max(0, 1.0 - result.distance / thresh))
+                    let prob = dtwProb(result.name, result.distance)
                     if let existing = probs[result.name] {
                         probs[result.name] = max(existing, prob)
                     } else {
@@ -238,16 +381,17 @@ final class GestureClassifier: ObservableObject {
                     }
                 }
                 let fallback = probs
+                let latency = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
                 Task { @MainActor in
                     self.predictions = fallback
+                    self.discreteLatencyMs = latency
                 }
             }
         }
     }
 
-    /// Classify using an externally provided Core ML model (raw time-series input).
-    private func classifyWithExternalModel(model: MLModel, window: [MotionSample]) {
-        let ws = windowSize
+    private func classifyWithExternalModel(model: MLModel, window: [MotionSample], startTime: CFAbsoluteTime) {
+        let ws = discreteWindowSize
         guard let input = Self.buildTimeSeriesInput(from: window, windowSize: ws) else { return }
 
         inferenceQueue.async { [weak self] in
@@ -267,26 +411,27 @@ final class GestureClassifier: ObservableObject {
                     }
 
                     let result = probs
+                    let latency = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
                     Task { @MainActor [weak self] in
                         self?.predictions = result
+                        self?.discreteLatencyMs = latency
                     }
                 }
             } catch {
-                // Classification failed silently — don't interrupt performance
+                // Classification failed silently
             }
         }
     }
 
-    /// Classify using DTW distance matching (fallback).
-    private func classifyWithDTW(window: [MotionSample]) {
+    private func classifyWithDTW(window: [MotionSample], startTime: CFAbsoluteTime) {
         let classifier = dtwClassifier
-        let thresh = classifier.threshold
+        let dtwProb = makeDtwProbabilityFn()
         inferenceQueue.async { [weak self] in
             let results = classifier.classify(window: window)
 
             var probs: [String: Float] = [:]
             for result in results {
-                let prob = Float(max(0, 1.0 - result.distance / thresh))
+                let prob = dtwProb(result.name, result.distance)
                 if let existing = probs[result.name] {
                     probs[result.name] = max(existing, prob)
                 } else {
@@ -295,8 +440,48 @@ final class GestureClassifier: ObservableObject {
             }
 
             let result = probs
+            let latency = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
             Task { @MainActor [weak self] in
                 self?.predictions = result
+                self?.discreteLatencyMs = latency
+            }
+        }
+    }
+
+    // MARK: - Continuous Classification
+
+    private func classifyContinuous(buffer: [MotionSample]) {
+        guard continuousClassifier.hasTemplates else { return }
+        let bufferCopy = buffer
+        let timestamp = buffer.last?.timestamp ?? 0
+        let startTime = CFAbsoluteTimeGetCurrent()
+
+        inferenceQueue.async { [weak self] in
+            guard let self else { return }
+            let states = self.continuousClassifier.classify(samples: bufferCopy, timestamp: timestamp)
+            let latency = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
+            Task { @MainActor [weak self] in
+                self?.continuousStates = states
+                self?.continuousLatencyMs = latency
+            }
+        }
+    }
+
+    // MARK: - Posture Classification
+
+    private func classifyPosture(buffer: [MotionSample]) {
+        guard postureClassifier.hasTemplates else { return }
+        let gravity = buffer.last!.gravity
+        let timestamp = buffer.last!.timestamp
+        let startTime = CFAbsoluteTimeGetCurrent()
+
+        inferenceQueue.async { [weak self] in
+            guard let self else { return }
+            let states = self.postureClassifier.classify(gravity: gravity, timestamp: timestamp)
+            let latency = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
+            Task { @MainActor [weak self] in
+                self?.postureStates = states
+                self?.postureLatencyMs = latency
             }
         }
     }

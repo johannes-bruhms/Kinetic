@@ -1,69 +1,71 @@
 # Kinetic
 
-iOS gesture controller app for live music performance. Streams IMU data over OSC and recognizes trainable custom gestures via DTW (Dynamic Time Warping) with Core ML as optional upgrade path.
+> **Living document** — update this file whenever architecture, thresholds, schemas, or conventions change.
 
-## Architecture
-- **Pattern**: MVVM + Swift 6 concurrency + SwiftUI
-- **Target**: iOS 17.0+, iPhone-first (iPad-compatible)
-- **Pricing**: $4.99 one-time purchase
-- **Default isolation**: `@MainActor` (project-wide Swift 6 setting)
-
-## Project Structure
-```
-Kinetic/
-  App/           - App entry point (KineticApp.swift)
-  Models/        - Data models
-    GestureModel.swift      - TrainedGesture, GestureRecording, MotionSample, Quaternion, Vector3
-    OSCConfiguration.swift  - OSC host/port/prefix/sampleRate config
-  Views/         - SwiftUI views
-    PerformanceView.swift         - Main dashboard: stream toggle, waveform, probability bars, recent gestures
-    GestureLibraryView.swift      - CRUD for gestures (add, rename via swipe-left, delete via swipe-right)
-    TrainingView.swift            - Record gesture samples, auto-segment, review & save
-    SettingsView.swift            - OSC config, Bonjour discovery, sample rate, data export
-    TestModeView.swift            - Full-screen rehearsal with large probability bars + haptic feedback
-    IMUWaveformView.swift         - Canvas-based real-time 3-axis acceleration plot
-    GestureProbabilityBarsView.swift - Color-coded probability bar display
-  Services/      - Core services
-    SensorManager.swift     - CoreMotion wrapper, 100-200 Hz IMU streaming on background queue
-    OSCSender.swift         - OSC binary encoding + UDP via NWConnection, 4 IMU streams + gesture events
-    GestureClassifier.swift - Hybrid classifier: DTW primary, Core ML optional. Sliding window (50 samples)
-    DTWClassifier.swift     - Dynamic Time Warping distance with 2-row memory optimization. nonisolated + Sendable
-    GestureSegmenter.swift  - Energy-based hysteresis state machine for auto-segmenting recordings
-    GestureLibrary.swift    - JSON persistence in Documents/kinetic_gestures/, recording storage, data export
-    BonjourBrowser.swift    - NWBrowser for _osc._udp discovery with endpoint resolution to IP:port
-  Resources/     - Assets.xcassets (AppIcon, AccentColor)
-KineticTests/    - Unit tests (DTW, Segmenter, OSC encoding)
-```
-
-## Key Technical Details
-- IMU streaming at 100-200 Hz via CoreMotion (.xArbitraryZVertical reference frame)
-- OSC over UDP using NWConnection (no external dependencies)
-- Gesture recognition via DTW as primary method (works immediately after training)
-- Core ML as optional upgrade (requires external model training)
-- Auto-segmentation via energy-based hysteresis state machine
-- All sensor processing off main thread
-- OSC prefix default: `/kinetic/`
-- Haptic feedback (UIImpactFeedbackGenerator) on gesture triggers
-
-## OSC Output Schema
-Default prefix: `/kinetic/` (user-editable)
-- `/kinetic/imu/attitude/quat` (x, y, z, w) — quaternion attitude
-- `/kinetic/imu/rotation/rate` (x, y, z) — gyroscope
-- `/kinetic/imu/accel/user` (x, y, z) — gravity-removed acceleration
-- `/kinetic/imu/gravity` (x, y, z) — gravity vector
-- `/kinetic/gesture/[name]` (float probability) — gesture event (>0.8)
-- `/kinetic/gesture/[name]/trigger` (int velocity) — gesture trigger (>0.9)
-
-## Conventions
-- Dark mode only (enforced in KineticApp.swift)
-- Large, glove-friendly touch targets for stage use
-- No analytics or tracking
-- Motion data never leaves device except via user-configured OSC stream
-- `nonisolated` annotation required for types used from background queues (DTWClassifier, GestureSegmenter)
-- `@unchecked Sendable` for mutable classes accessed across isolation boundaries
+iOS gesture controller for live music performance. IMU → OSC over UDP. Three-layer recognition: discrete (DTW), continuous (FFT), posture (gravity).
 
 ## Build & Test
-- **Build**: `xcodebuild -project Kinetic.xcodeproj -scheme Kinetic -destination 'generic/platform=iOS'`
-- **Test**: `xcodebuild test -project Kinetic.xcodeproj -scheme Kinetic -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -only-testing:KineticTests`
-- Simulator has no IMU — real device required for motion testing
-- No external dependencies (pure Apple frameworks: CoreMotion, Network, CoreML)
+```bash
+xcodebuild -project Kinetic.xcodeproj -scheme Kinetic -destination 'generic/platform=iOS'
+xcodebuild test -project Kinetic.xcodeproj -scheme Kinetic -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -only-testing:KineticTests
+```
+No external deps (CoreMotion, Network, CoreML, Accelerate). No IMU in simulator.
+
+## Architecture
+- MVVM + SwiftUI, iOS 17.0+, Swift 6 strict concurrency
+- `@MainActor` project-wide default isolation
+- `nonisolated` + `Sendable` for background-queue types (DTWClassifier, GestureSegmenter, FrequencyAnalyzer, ContinuousClassifier, PostureClassifier)
+- `@unchecked Sendable` for mutable classes crossing isolation boundaries
+
+## Recognition Layers
+Three layers run in parallel on the same IMU sample stream, each tuned to a different temporal scale:
+- **Discrete** (0.5s window, stride 10): DTW + Random Forest, trigger events. Per-gesture debounce cooldown (default 500ms). Per-gesture sensitivity controls DTW distance threshold (2.5–6.0) and trigger probability threshold (0.70–0.30).
+- **Continuous** (1.5s window, stride 25): FFT frequency analysis via `FrequencyAnalyzer` (Accelerate vDSP). State machine with hysteresis: idle → candidate (0.5s) → active (1.0s) → cooldown (0.5s) → idle. Per-gesture match threshold (0.80–0.35). Outputs state + intensity.
+- **Posture** (0.5s window, stride 50): Gravity vector matching with low-pass filter. Per-gesture angle tolerance (0.15–0.50 rad, ~9°–29°). Hysteresis: 500ms to activate, 300ms to deactivate.
+
+`GestureClassifier` orchestrates all three layers with separate buffers and classification cadences. Energy gate threshold: 0.2.
+
+### Per-Gesture Sensitivity
+`TrainedGesture.sensitivity` (0.0–1.0, default 0.5) controls per-type thresholds:
+- Discrete: `dtwDistanceThreshold` = 2.5 + sensitivity × 3.5; `triggerThreshold` = 0.70 - sensitivity × 0.40
+- Continuous: `matchThreshold` = 0.80 - sensitivity × 0.45
+- Posture: `toleranceAngle` = 0.15 + sensitivity × 0.35 (radians)
+
+### Latency Measurement
+`GestureClassifier` measures end-to-end classification latency (processSample dispatch → MainActor result) for all three layers. Logged in CSV, displayed in PerformanceView as colored pills (green <5ms, yellow <15ms, red >15ms).
+
+### Gyro Calibration
+`SensorManager.calibrate()` captures the current `CMAttitude` as reference. All subsequent attitude data is relative to this zero point via `multiply(byInverseOf:)`. Exposed as "Zero" button in PerformanceView.
+
+## OSC Schema
+Prefix: `/kinetic/` (user-editable)
+- IMU: `.../attitude/quat` `.../rotation/rate` `.../accel/user` `.../gravity`
+- Discrete: `.../gesture/[name]` (float prob>0.3), `.../gesture/[name]/trigger` (int velocity, per-gesture threshold, debounced)
+- Continuous: `.../gesture/[name]/state` (int 0/1, on transitions), `.../gesture/[name]/intensity` (float 0–1, while active)
+- Posture: `.../gesture/[name]/state` (int 0/1, on transitions)
+
+## Session Logging & Analysis
+- `PerformanceLogger` records CSV to `Documents/kinetic_sessions/` (persists on device)
+- CSV columns: Time, AccXYZ, RotXYZ, Trigger, Probabilities, ContinuousState, PostureState, LatencyMs
+- `SessionAnalyzer` parses CSVs and produces reports: trigger counts, rapid-fire detection, untriggered probability peaks, continuous/posture active durations, latency percentiles (p50/p95/p99)
+- `SessionAnalysisView` lists on-device sessions, auto-analyzes most recent, with actionable recommendations
+
+## Training
+- **Discrete**: Hold-to-record, auto-segmented by `GestureSegmenter` (energy thresholds). Multiple recordings per gesture, reviewed before saving.
+- **Continuous**: 10-second auto-timed recording. Extracts `ContinuousGestureProfile` (dominant frequency, band energies, axis distribution, amplitude range) via FFT. Multiple recordings averaged.
+- **Posture**: 3-second countdown, captures average gravity vector.
+
+## Constraints
+- Dark mode only, large touch targets (stage use with gloves)
+- No analytics/tracking. Motion data stays on-device except user-configured OSC.
+- Zero external dependencies — Apple frameworks only
+- JSON persistence in `Documents/kinetic_gestures/`, session CSVs in `Documents/kinetic_sessions/`
+
+## Workflow
+After each `TODO.md` phase:
+1. Build — zero warnings
+2. Test — full KineticTests + new phase tests
+3. `/simplify` — check for unnecessary complexity
+4. Commit — one per phase, message references phase number
+
+Use `xcodebuild` MCP server (`.mcp.json`) for build/test/project inspection. Follow `TODO.md` phase order.

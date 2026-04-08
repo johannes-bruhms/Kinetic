@@ -1,13 +1,17 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+struct ExportItem: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
 struct SettingsView: View {
     @EnvironmentObject var oscSender: OSCSender
     @EnvironmentObject var gestureLibrary: GestureLibrary
     @StateObject private var bonjourBrowser = BonjourBrowser()
 
-    @State private var showingExportSheet = false
-    @State private var exportURL: URL?
+    @State private var exportItem: ExportItem?
 
     var body: some View {
         Form {
@@ -85,6 +89,10 @@ struct SettingsView: View {
                     exportGestureData()
                 }
                 .disabled(gestureLibrary.gestures.isEmpty)
+
+                NavigationLink("Analyze Session") {
+                    SessionAnalysisView()
+                }
             }
 
             Section("About") {
@@ -103,17 +111,14 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("Settings")
-        .sheet(isPresented: $showingExportSheet) {
-            if let url = exportURL {
-                ShareSheet(items: [url])
-            }
+        .sheet(item: $exportItem) { item in
+            ShareSheet(items: [item.url])
         }
     }
 
     private func exportGestureData() {
         guard let url = gestureLibrary.exportAllData() else { return }
-        exportURL = url
-        showingExportSheet = true
+        exportItem = ExportItem(url: url)
     }
 }
 

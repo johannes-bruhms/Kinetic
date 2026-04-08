@@ -71,10 +71,35 @@ final class OSCSender: ObservableObject {
         }
     }
 
+    /// Send continuous/posture gesture state transition (0 or 1).
+    func sendGestureState(name: String, isActive: Bool) {
+        let prefix = configuration.prefix
+        guard let connection = self.connection else { return }
+
+        sendQueue.async {
+            self.performSendInt(connection: connection, address: "\(prefix)gesture/\(name)/state", value: isActive ? 1 : 0)
+        }
+    }
+
+    /// Send continuous gesture intensity (0.0–1.0), sent while active.
+    func sendGestureIntensity(name: String, intensity: Float) {
+        let prefix = configuration.prefix
+        guard let connection = self.connection else { return }
+
+        sendQueue.async {
+            self.performSend(connection: connection, address: "\(prefix)gesture/\(name)/intensity", values: [Double(intensity)])
+        }
+    }
+
     // MARK: - OSC Encoding
 
     nonisolated private func performSend(connection: NWConnection, address: String, values: [Double]) {
         let data = encodeOSCMessage(address: address, floats: values.map { Float($0) })
+        connection.send(content: data, completion: .contentProcessed { _ in })
+    }
+
+    nonisolated private func performSendInt(connection: NWConnection, address: String, value: Int32) {
+        let data = encodeOSCMessageInt(address: address, value: value)
         connection.send(content: data, completion: .contentProcessed { _ in })
     }
 
@@ -94,6 +119,15 @@ final class OSCSender: ObservableObject {
             data.append(Data(bytes: &big, count: 4))
         }
 
+        return data
+    }
+
+    nonisolated private func encodeOSCMessageInt(address: String, value: Int32) -> Data {
+        var data = Data()
+        data.append(oscString(address))
+        data.append(oscString(",i"))
+        var big = value.bigEndian
+        data.append(Data(bytes: &big, count: 4))
         return data
     }
 

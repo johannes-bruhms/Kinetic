@@ -26,6 +26,7 @@ nonisolated struct GestureSegmenter {
         var segments: [Segment] = []
         var motionStartIndex = 0
         var restStartTime: TimeInterval = 0
+        var restStartIndex = 0
 
         for (i, sample) in samples.enumerated() {
             let energy = sampleEnergy(sample)
@@ -41,17 +42,19 @@ nonisolated struct GestureSegmenter {
                 if energy < energyThresholdLow {
                     if restStartTime == 0 {
                         restStartTime = sample.timestamp
+                        restStartIndex = i
                     }
 
                     let restDuration = sample.timestamp - restStartTime
                     if restDuration >= minimumRestDuration {
-                        // End of gesture — check minimum duration
-                        let gestureDuration = samples[i].timestamp - samples[motionStartIndex].timestamp
+                        // End of gesture — check minimum duration up to the start of the rest
+                        let gestureDuration = samples[restStartIndex].timestamp - samples[motionStartIndex].timestamp
                         if gestureDuration >= minimumGestureDuration {
-                            let segmentSamples = Array(samples[motionStartIndex...i])
+                            // Slice up to restStartIndex to remove the trailing silence
+                            let segmentSamples = Array(samples[motionStartIndex...restStartIndex])
                             segments.append(Segment(
                                 startIndex: motionStartIndex,
-                                endIndex: i,
+                                endIndex: restStartIndex,
                                 samples: segmentSamples
                             ))
                         }
@@ -66,12 +69,13 @@ nonisolated struct GestureSegmenter {
 
         // Handle case where recording ends during motion
         if case .motion = state {
-            let gestureDuration = samples.last!.timestamp - samples[motionStartIndex].timestamp
+            let endIndex = restStartTime == 0 ? samples.count - 1 : restStartIndex
+            let gestureDuration = samples[endIndex].timestamp - samples[motionStartIndex].timestamp
             if gestureDuration >= minimumGestureDuration {
-                let segmentSamples = Array(samples[motionStartIndex...])
+                let segmentSamples = Array(samples[motionStartIndex...endIndex])
                 segments.append(Segment(
                     startIndex: motionStartIndex,
-                    endIndex: samples.count - 1,
+                    endIndex: endIndex,
                     samples: segmentSamples
                 ))
             }

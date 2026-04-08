@@ -2,6 +2,7 @@ import SwiftUI
 
 struct GestureProbabilityBarsView: View {
     let predictions: [String: Float]
+    var gestureType: GestureType = .discrete
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -31,7 +32,13 @@ struct GestureProbabilityBarsView: View {
     }
 
     private func barColor(for probability: Float) -> Color {
-        if probability > 0.8 { return .green }
+        let typeColor: Color = switch gestureType {
+        case .discrete: .blue
+        case .continuous: .green
+        case .posture: .orange
+        }
+
+        if probability > 0.8 { return typeColor }
         if probability > 0.5 { return .yellow }
         return .gray
     }

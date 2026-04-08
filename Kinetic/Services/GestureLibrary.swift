@@ -15,8 +15,8 @@ final class GestureLibrary: ObservableObject {
         loadGestures()
     }
 
-    func addGesture(name: String) -> TrainedGesture {
-        let gesture = TrainedGesture(name: name)
+    func addGesture(name: String, type: GestureType = .discrete) -> TrainedGesture {
+        let gesture = TrainedGesture(name: name, gestureType: type)
         gestures.append(gesture)
         saveGestures()
         return gesture
