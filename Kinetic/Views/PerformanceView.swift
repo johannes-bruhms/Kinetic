@@ -5,17 +5,15 @@ struct PerformanceView: View {
     @EnvironmentObject var sensorManager: SensorManager
     @EnvironmentObject var oscSender: OSCSender
     @EnvironmentObject var gestureLibrary: GestureLibrary
+    @EnvironmentObject var calibrationManager: CalibrationManager
     @StateObject private var classifier = GestureClassifier()
+    @State private var router: PerformanceRouter?
 
     @State private var recentGestures: [(name: String, time: Date)] = []
     private let hapticImpact = UIImpactFeedbackGenerator(style: .heavy)
 
     @State private var isLogging = false
     @State private var exportItem: ExportItem?
-
-    // Track previous continuous/posture states for transition detection
-    @State private var previousContinuousActive: Set<String> = []
-    @State private var previousPostureActive: Set<String> = []
 
     var body: some View {
         NavigationStack {
@@ -252,8 +250,7 @@ struct PerformanceView: View {
             sensorManager.stopStreaming()
             oscSender.disconnect()
             classifier.reset()
-            previousContinuousActive.removeAll()
-            previousPostureActive.removeAll()
+            router?.reset()
             if isLogging {
                 toggleLogging()
             }
@@ -261,55 +258,29 @@ struct PerformanceView: View {
             classifier.loadTemplates(from: gestureLibrary)
             hapticImpact.prepare()
 
+            // Set up the performance router
+            let performanceRouter = PerformanceRouter(oscSender: oscSender)
+            performanceRouter.onTrigger = { event in
+                hapticImpact.impactOccurred()
+                recentGestures.append((name: event.gestureName, time: .now))
+                if recentGestures.count > 20 {
+                    recentGestures.removeFirst()
+                }
+            }
+            router = performanceRouter
+
             oscSender.connect()
             sensorManager.startStreaming { sample in
                 Task { @MainActor in
                     oscSender.sendIMU(sample)
                     classifier.processSample(sample)
 
-                    var triggeredGesture: String?
+                    // Route events through the performance router (handles all OSC dispatch)
+                    performanceRouter.route(classifier.performanceEvents)
 
-                    // Discrete gesture triggers with per-gesture thresholds
-                    for (name, prob) in classifier.predictions where prob > 0.3 {
-                        oscSender.sendGestureEvent(name: name, probability: prob)
-                        let threshold = classifier.triggerThreshold(for: name)
-                        if prob > threshold && classifier.shouldTrigger(gestureName: name) {
-                            oscSender.sendGestureTrigger(name: name)
-                            hapticImpact.impactOccurred()
-                            recentGestures.append((name: name, time: .now))
-                            triggeredGesture = name
-                            if recentGestures.count > 20 {
-                                recentGestures.removeFirst()
-                            }
-                        }
-                    }
-
-                    // Continuous gesture OSC output
-                    if !classifier.continuousStates.isEmpty {
-                        let currentContinuousActive = Set(classifier.continuousStates.filter { $0.value.isActive }.map(\.key))
-                        for (name, state) in classifier.continuousStates {
-                            let wasActive = previousContinuousActive.contains(name)
-                            if state.isActive != wasActive {
-                                oscSender.sendGestureState(name: name, isActive: state.isActive)
-                            }
-                            if state.isActive {
-                                oscSender.sendGestureIntensity(name: name, intensity: state.intensity)
-                            }
-                        }
-                        previousContinuousActive = currentContinuousActive
-                    }
-
-                    // Posture gesture OSC output
-                    if !classifier.postureStates.isEmpty {
-                        let currentPostureActive = Set(classifier.postureStates.filter { $0.value }.map(\.key))
-                        for (name, isActive) in classifier.postureStates {
-                            let wasActive = previousPostureActive.contains(name)
-                            if isActive != wasActive {
-                                oscSender.sendGestureState(name: name, isActive: isActive)
-                            }
-                        }
-                        previousPostureActive = currentPostureActive
-                    }
+                    // Find triggered gesture for logging
+                    let triggeredGesture = classifier.performanceEvents
+                        .first { $0.lane == .discrete && $0.phase == .active }?.gestureName
 
                     if isLogging {
                         await PerformanceLogger.shared.log(

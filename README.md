@@ -63,11 +63,93 @@ Configure the target IP and port in the Settings tab.
 
 ## Architecture
 
-MVVM + SwiftUI with Swift 6 strict concurrency. Three classification layers run on background queues with results merged on the main actor:
+MVVM + SwiftUI with Swift 6 strict concurrency. Three classification layers run on background queues. A semantic event layer fuses classifier outputs into typed `PerformanceEvent` objects before routing to OSC, UI, and logging.
 
+```mermaid
+flowchart TD
+    subgraph Sensors
+        IMU["CoreMotion IMU\n(attitude, rotation, accel, gravity)"]
+    end
+
+    IMU --> SM["SensorManager"]
+    SM --> GC["GestureClassifier\n(MainActor, orchestrates all layers)"]
+
+    subgraph Recognition["Three Parallel Recognition Layers"]
+        direction LR
+        D["Discrete\nDTW + Random Forest\n0.5s window, stride 10"]
+        C["Continuous\nFFT (Accelerate vDSP)\n1.5s window, stride 25"]
+        P["Posture\nGravity Vector Matching\n0.5s window, stride 50"]
+    end
+
+    GC --> D
+    GC --> C
+    GC --> P
+    D -- "predictions" --> GC
+    C -- "states + intensity" --> GC
+    P -- "states" --> GC
+
+    GC --> FE["EventFusionEngine\n(confidence smoothing, ambiguity,\nphase tracking, debounce)"]
+    FE -- "PerformanceEvents" --> PR["PerformanceRouter\n(default + custom mapping)"]
+    FE -- "PerformanceEvents" --> UI["SwiftUI Views\n(MVVM)"]
+
+    PR --> OSC["OSCSender\n(Network framework, UDP)"]
+    OSC --> EXT["External Software\nAbleton / Max/MSP\nTouchDesigner / QLab"]
+
+    subgraph EventLayer["Semantic Event Layer"]
+        FE
+        PR
+    end
+
+    subgraph Config["Configuration"]
+        CM["CalibrationManager\n(reusable profiles)"]
+        MP["MappingPresets\n(custom OSC routing)"]
+    end
+
+    CM --> GC
+    MP --> PR
+
+    subgraph Logging["Session Logging"]
+        PL["PerformanceLogger\n(CSV)"]
+        SA["SessionAnalyzer\n(reports + recommendations)"]
+    end
+
+    GC --> PL
+    PL --> SA
+
+    subgraph Training["On-Device Training"]
+        REC["Gesture Recording"] --> SEG["GestureSegmenter"]
+        SEG --> TPL["JSON Templates\n(Documents/)"]
+    end
+
+    TPL --> GC
+
+    style Recognition fill:#1a1a2e,stroke:#16213e,color:#e0e0e0
+    style EventLayer fill:#0d1b2a,stroke:#533483,color:#e0e0e0
+    style Config fill:#1a1a2e,stroke:#16213e,color:#e0e0e0
+    style Logging fill:#1a1a2e,stroke:#16213e,color:#e0e0e0
+    style Training fill:#1a1a2e,stroke:#16213e,color:#e0e0e0
+    style Sensors fill:#1a1a2e,stroke:#16213e,color:#e0e0e0
+    style GC fill:#0f3460,stroke:#533483,color:#e0e0e0
+    style FE fill:#533483,stroke:#e94560,color:#e0e0e0
+    style PR fill:#533483,stroke:#e94560,color:#e0e0e0
+    style D fill:#533483,stroke:#e94560,color:#e0e0e0
+    style C fill:#533483,stroke:#e94560,color:#e0e0e0
+    style P fill:#533483,stroke:#e94560,color:#e0e0e0
+    style OSC fill:#0f3460,stroke:#533483,color:#e0e0e0
+    style UI fill:#0f3460,stroke:#533483,color:#e0e0e0
+    style EXT fill:#16213e,stroke:#e94560,color:#e0e0e0
+```
+
+### Recognition Layers
 - **Discrete** (0.5s window, stride 10) -- DTW distance matching + Random Forest probability, per-gesture debounce cooldown
 - **Continuous** (1.5s window, stride 25) -- FFT via Accelerate vDSP, hysteresis state machine (idle -> candidate -> active -> cooldown -> idle)
 - **Posture** (0.5s window, stride 50) -- gravity vector angle matching with low-pass filter, activation/deactivation hysteresis
+
+### Semantic Event Layer
+Raw classifier outputs are fused into `PerformanceEvent` objects by `EventFusionEngine`. Each event carries a lifecycle phase (candidate, active, release, cooldown, ambiguous, suppressed), smoothed confidence, intensity, latency, and competing gesture info. `PerformanceRouter` maps events to OSC output -- default routing preserves the standard schema, custom `MappingPreset` routes support latch, envelope, and macro actions.
+
+### Calibration Profiles
+`CalibrationManager` stores reusable calibration presets with reference attitude, per-gesture sensitivity and cooldown overrides, and energy gate tuning. Profiles can be captured from current state and applied before performances.
 
 Session logging records CSV files on-device with built-in analysis: trigger counts, latency percentiles, and actionable tuning recommendations.
 

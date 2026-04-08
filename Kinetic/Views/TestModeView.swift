@@ -190,16 +190,14 @@ struct TestModeView: View {
                 Task { @MainActor in
                     classifier.processSample(sample)
 
-                    var triggeredGesture: String?
+                    // Use fusion engine events for trigger detection
+                    let triggeredEvent = classifier.performanceEvents
+                        .first { $0.lane == .discrete && $0.phase == .active }
 
-                    // Discrete triggers with debounce
-                    for (name, prob) in classifier.predictions where prob > 0.9 {
-                        if classifier.shouldTrigger(gestureName: name) {
-                            lastDetected = name
-                            triggeredGesture = name
-                            if hapticEnabled {
-                                hapticImpact.impactOccurred()
-                            }
+                    if let event = triggeredEvent {
+                        lastDetected = event.gestureName
+                        if hapticEnabled {
+                            hapticImpact.impactOccurred()
                         }
                     }
 
@@ -207,7 +205,7 @@ struct TestModeView: View {
                         await PerformanceLogger.shared.log(
                             sample: sample,
                             probabilities: classifier.predictions,
-                            triggeredGesture: triggeredGesture,
+                            triggeredGesture: triggeredEvent?.gestureName,
                             continuousStates: classifier.continuousStates,
                             postureStates: classifier.postureStates
                         )

@@ -15,6 +15,9 @@ final class GestureClassifier: ObservableObject {
     // Posture layer output
     @Published var postureStates: [String: Bool] = [:]
 
+    // Semantic event layer output (fused from all three lanes)
+    @Published var performanceEvents: [PerformanceEvent] = []
+
     @Published var isModelLoaded = false
     @Published var isTraining = false
 
@@ -22,6 +25,9 @@ final class GestureClassifier: ObservableObject {
     @Published var discreteLatencyMs: Double = 0
     @Published var continuousLatencyMs: Double = 0
     @Published var postureLatencyMs: Double = 0
+
+    /// Event fusion engine — converts raw classifier outputs to typed events.
+    let fusionEngine = EventFusionEngine()
 
     /// On-device trained model (Random Forest from user's gesture recordings).
     private var onDeviceModel: MLModel?
@@ -140,6 +146,9 @@ final class GestureClassifier: ObservableObject {
                 }
             }
         }
+
+        // Configure fusion engine with same gesture library
+        fusionEngine.loadConfiguration(from: library)
 
         // Attempt on-device model training for discrete gestures
         #if !targetEnvironment(simulator)
@@ -277,9 +286,11 @@ final class GestureClassifier: ObservableObject {
         predictions.removeAll()
         continuousStates.removeAll()
         postureStates.removeAll()
+        performanceEvents.removeAll()
         samplesSinceDiscrete = 0
         samplesSinceContinuous = 0
         samplesSincePosture = 0
+        fusionEngine.reset()
     }
 
     // MARK: - Debounce & Sensitivity
@@ -364,8 +375,11 @@ final class GestureClassifier: ObservableObject {
                 let result = probs
                 let latency = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
                 Task { @MainActor [weak self] in
-                    self?.predictions = result
-                    self?.discreteLatencyMs = latency
+                    guard let self else { return }
+                    self.predictions = result
+                    self.discreteLatencyMs = latency
+                    self.fusionEngine.processDiscrete(predictions: result, latencyMs: latency)
+                    self.performanceEvents = self.fusionEngine.events
                 }
             } catch {
                 guard let self else { return }
@@ -382,9 +396,12 @@ final class GestureClassifier: ObservableObject {
                 }
                 let fallback = probs
                 let latency = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
-                Task { @MainActor in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
                     self.predictions = fallback
                     self.discreteLatencyMs = latency
+                    self.fusionEngine.processDiscrete(predictions: fallback, latencyMs: latency)
+                    self.performanceEvents = self.fusionEngine.events
                 }
             }
         }
@@ -413,8 +430,11 @@ final class GestureClassifier: ObservableObject {
                     let result = probs
                     let latency = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
                     Task { @MainActor [weak self] in
-                        self?.predictions = result
-                        self?.discreteLatencyMs = latency
+                        guard let self else { return }
+                        self.predictions = result
+                        self.discreteLatencyMs = latency
+                        self.fusionEngine.processDiscrete(predictions: result, latencyMs: latency)
+                        self.performanceEvents = self.fusionEngine.events
                     }
                 }
             } catch {
@@ -442,8 +462,11 @@ final class GestureClassifier: ObservableObject {
             let result = probs
             let latency = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
             Task { @MainActor [weak self] in
-                self?.predictions = result
-                self?.discreteLatencyMs = latency
+                guard let self else { return }
+                self.predictions = result
+                self.discreteLatencyMs = latency
+                self.fusionEngine.processDiscrete(predictions: result, latencyMs: latency)
+                self.performanceEvents = self.fusionEngine.events
             }
         }
     }
@@ -461,8 +484,11 @@ final class GestureClassifier: ObservableObject {
             let states = self.continuousClassifier.classify(samples: bufferCopy, timestamp: timestamp)
             let latency = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
             Task { @MainActor [weak self] in
-                self?.continuousStates = states
-                self?.continuousLatencyMs = latency
+                guard let self else { return }
+                self.continuousStates = states
+                self.continuousLatencyMs = latency
+                self.fusionEngine.processContinuous(states: states, latencyMs: latency)
+                self.performanceEvents = self.fusionEngine.events
             }
         }
     }
@@ -480,8 +506,11 @@ final class GestureClassifier: ObservableObject {
             let states = self.postureClassifier.classify(gravity: gravity, timestamp: timestamp)
             let latency = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
             Task { @MainActor [weak self] in
-                self?.postureStates = states
-                self?.postureLatencyMs = latency
+                guard let self else { return }
+                self.postureStates = states
+                self.postureLatencyMs = latency
+                self.fusionEngine.processPosture(states: states, latencyMs: latency)
+                self.performanceEvents = self.fusionEngine.events
             }
         }
     }
